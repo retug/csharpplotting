@@ -1,9 +1,11 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.ConstrainedExecution;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Controls;
 
 namespace PlottingGraphs
 {
@@ -45,6 +47,9 @@ namespace PlottingGraphs
     {
         public Point Start { get; set; }
         public Point End { get; set; }
+
+        private bool _hasHover;
+        private Point _hoverScreenPoint;
 
         // (t, value) list
         public IEnumerable<(double t, double value)> Samples { get; set; } =
@@ -91,7 +96,15 @@ namespace PlottingGraphs
             DrawPerpPlot(dc);
 
             dc.Pop();
+
+            // --- Hover overlay in SCREEN space ---
+            if (_hasHover)
+            {
+                double r = 4.0;
+                dc.DrawEllipse(Brushes.Red, null, _hoverScreenPoint, r, r);
+            }
         }
+
 
         private void DrawBaseLine(DrawingContext dc)
         {
@@ -103,32 +116,64 @@ namespace PlottingGraphs
 
         private void DrawPerpPlot(DrawingContext dc)
         {
-            var samplesList = Samples?.ToList();
-            if (samplesList == null || samplesList.Count < 2) return;
+            var samplesList = Samples?
+                .OrderBy(s => s.t)  // make sure points go in order along the line
+                .ToList();
 
-            var geom = new StreamGeometry();
-            using (var ctx = geom.Open())
+            if (samplesList == null || samplesList.Count < 2)
+                return;
+
+            var basePts = new List<Point>();
+            var curvePts = new List<Point>();
+
+            foreach (var (t, v) in samplesList)
             {
-                bool first = true;
-                foreach (var (t, v) in samplesList)
-                {
-                    var pt = SamplePoint(Start, End, t, v, ValueScale);
-                    if (first)
-                    {
-                        ctx.BeginFigure(pt, false, false);
-                        first = false;
-                    }
-                    else
-                    {
-                        ctx.LineTo(pt, true, false);
-                    }
-                }
+                basePts.Add(BasePoint(Start, End, t));                  // on the line
+                curvePts.Add(SamplePoint(Start, End, t, v, ValueScale)); // offset
             }
-            geom.Freeze();
+
+            // --- 1) Shaded area geometry between baseline and curve ---
+            var areaGeom = new StreamGeometry();
+            using (var ctx = areaGeom.Open())
+            {
+                // Start at the first baseline point
+                ctx.BeginFigure(basePts[0], isFilled: true, isClosed: true);
+
+                // Go along the baseline from start → end
+                for (int i = 1; i < basePts.Count; i++)
+                    ctx.LineTo(basePts[i], isStroked: true, isSmoothJoin: false);
+
+                // Then go back along the curve from end → start
+                for (int i = curvePts.Count - 1; i >= 0; i--)
+                    ctx.LineTo(curvePts[i], isStroked: true, isSmoothJoin: false);
+                // Because isClosed=true in BeginFigure, it will close back to basePts[0]
+            }
+            areaGeom.Freeze();
+
+            // Semi-transparent fill under the curve
+            var fillBrush = new SolidColorBrush(Color.FromArgb(60, 0, 120, 215)); // alpha, R,G,B
+            dc.DrawGeometry(fillBrush, null, areaGeom);
+
+            // --- 2) Draw the curve line on top (what you had before, but reusing curvePts) ---
+            var lineGeom = new StreamGeometry();
+            using (var ctx = lineGeom.Open())
+            {
+                ctx.BeginFigure(curvePts[0], isFilled: false, isClosed: false);
+                for (int i = 1; i < curvePts.Count; i++)
+                    ctx.LineTo(curvePts[i], isStroked: true, isSmoothJoin: false);
+            }
+            lineGeom.Freeze();
 
             var pen = new Pen(Brushes.Blue, 0.02);
-            dc.DrawGeometry(null, pen, geom);
+            dc.DrawGeometry(null, pen, lineGeom);
         }
+
+        private static Point BasePoint(Point start, Point end, double t)
+        {
+            Vector line = end - start;
+            return start + t * line;
+        }
+
 
         private static Point SamplePoint(Point start, Point end, double t, double v, double scale)
         {
@@ -238,6 +283,65 @@ namespace PlottingGraphs
             InvalidateVisual();
         }
 
+        private void UpdateHover(Point mousePos)
+        {
+            var samplesList = Samples?
+                .OrderBy(s => s.t)  // ensure consistent ordering
+                .ToList();
+
+            if (samplesList == null || samplesList.Count == 0)
+            {
+                _hasHover = false;
+                ToolTipService.SetToolTip(this, null);
+                return;
+            }
+
+            double threshold = 10.0;              // pixels
+            double threshold2 = threshold * threshold;
+
+            int bestIndex = -1;
+            double bestDist2 = threshold2;
+            Point bestScreen = new Point();
+
+            // Search for the closest sample in SCREEN space
+            for (int i = 0; i < samplesList.Count; i++)
+            {
+                var (t, v) = samplesList[i];
+                var worldPt = SamplePoint(Start, End, t, v, ValueScale);
+                var screenPt = _viewMatrix.Transform(worldPt);
+
+                double dx = screenPt.X - mousePos.X;
+                double dy = screenPt.Y - mousePos.Y;
+                double d2 = dx * dx + dy * dy;
+
+                if (d2 < bestDist2)
+                {
+                    bestDist2 = d2;
+                    bestIndex = i;
+                    bestScreen = screenPt;
+                }
+            }
+
+            if (bestIndex >= 0)
+            {
+                var (t, v) = samplesList[bestIndex];
+                _hasHover = true;
+                _hoverScreenPoint = bestScreen;
+
+                // Use ToolTipService explicitly
+                string text = $"t = {t:0.###}, value = {v:0.###}";
+                ToolTipService.SetToolTip(this, text);
+            }
+            else
+            {
+                _hasHover = false;
+                ToolTipService.SetToolTip(this, null);
+            }
+
+            InvalidateVisual();
+        }
+
+
         // ====== Pan & Zoom ======
 
         private void OnMouseWheel(object sender, MouseWheelEventArgs e)
@@ -282,9 +386,11 @@ namespace PlottingGraphs
 
         private void OnMouseMove(object sender, MouseEventArgs e)
         {
+            var cur = e.GetPosition(this);
+
             if (_isPanning && e.LeftButton == MouseButtonState.Pressed)
             {
-                var cur = e.GetPosition(this);
+                
                 Vector delta = cur - _lastMouse;
 
                 // Translate in screen space
@@ -295,6 +401,9 @@ namespace PlottingGraphs
                 _lastMouse = cur;
                 InvalidateVisual();
             }
+
+            // Update hover highlight and tooltip regardless of panning
+            UpdateHover(cur);
         }
 
         private void OnMouseUp(object sender, MouseButtonEventArgs e)
