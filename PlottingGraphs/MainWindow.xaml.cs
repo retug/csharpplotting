@@ -6,6 +6,7 @@ using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Controls;
+using System.Globalization;   
 
 namespace PlottingGraphs
 {
@@ -20,7 +21,7 @@ namespace PlottingGraphs
 
             // Example: line from (0,0) to (1,1) in world "units"
             Plot.Start = new Point(0, 0);
-            Plot.End = new Point(1, 20);
+            Plot.End = new Point(15, 20);
 
             // Sample data: t, value
             var samples = new List<(double t, double value)>
@@ -47,6 +48,7 @@ namespace PlottingGraphs
     {
         public Point Start { get; set; }
         public Point End { get; set; }
+        private string _hoverLabel;
 
         private bool _hasHover;
         private Point _hoverScreenPoint;
@@ -102,6 +104,35 @@ namespace PlottingGraphs
             {
                 double r = 4.0;
                 dc.DrawEllipse(Brushes.Red, null, _hoverScreenPoint, r, r);
+
+                if (!string.IsNullOrEmpty(_hoverLabel))
+                {
+                    // Slight offset so we don't draw directly under the cursor
+                    Point labelPos = new Point(_hoverScreenPoint.X + 8, _hoverScreenPoint.Y - 8);
+
+                    var typeface = new Typeface("Segoe UI");
+                    double fontSize = 12.0;
+                    double pixelsPerDip = VisualTreeHelper.GetDpi(this).PixelsPerDip;
+
+                    var ft = new FormattedText(
+                        _hoverLabel,
+                        CultureInfo.InvariantCulture,
+                        FlowDirection.LeftToRight,
+                        typeface,
+                        fontSize,
+                        Brushes.Black,
+                        pixelsPerDip);
+
+                    // Background rectangle behind text for readability
+                    Rect textRect = new Rect(
+                        labelPos.X - 4,
+                        labelPos.Y - 4,
+                        ft.Width + 8,
+                        ft.Height + 8);
+
+                    dc.DrawRectangle(Brushes.White, new Pen(Brushes.Black, 0.5), textRect);
+                    dc.DrawText(ft, new Point(labelPos.X, labelPos.Y));
+                }
             }
         }
 
@@ -292,7 +323,7 @@ namespace PlottingGraphs
             if (samplesList == null || samplesList.Count == 0)
             {
                 _hasHover = false;
-                ToolTipService.SetToolTip(this, null);
+                _hoverLabel = null;
                 return;
             }
 
@@ -327,19 +358,17 @@ namespace PlottingGraphs
                 var (t, v) = samplesList[bestIndex];
                 _hasHover = true;
                 _hoverScreenPoint = bestScreen;
-
-                // Use ToolTipService explicitly
-                string text = $"t = {t:0.###}, value = {v:0.###}";
-                ToolTipService.SetToolTip(this, text);
+                _hoverLabel = $"t = {t:0.###}, value = {v:0.###}";
             }
             else
             {
                 _hasHover = false;
-                ToolTipService.SetToolTip(this, null);
+                _hoverLabel = null;
             }
 
             InvalidateVisual();
         }
+
 
 
         // ====== Pan & Zoom ======
